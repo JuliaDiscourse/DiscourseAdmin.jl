@@ -1,6 +1,6 @@
 using DiscourseAdmin
 using DiscourseAdmin: singular, entry_for, config_routes, existing_files, available_locales,
-                      configured_keys, get_value, set_value!, reset_value!,
+                      configured_keys, get_value, set_value!, reset_value!, entries, FLAGS,
                       pull!, file_changes, apply!, git
 using HTTP
 using JSON
@@ -9,9 +9,10 @@ using Test
 # ---------------------------------------------------------------------------
 # A mock Discourse instance: per-locale site text overrides (rejecting
 # locale-less requests, like the real one), a locale-less "mock_things"
-# route, and the site settings listing the available locales. The site
-# texts listing paginates like the real one (but with a tiny page size so
-# the tests routinely cross page boundaries).
+# route, the site settings listing the available locales, and custom
+# flags (JSON records addressed by id, listed alongside the built-in
+# flags in site.json). The site texts listing paginates like the real one
+# (but with a tiny page size so the tests routinely cross page boundaries).
 
 const PAGE_SIZE = 2
 const LAST_PUT_LOCALE = Ref("")
@@ -19,13 +20,49 @@ const LAST_PUT_LOCALE = Ref("")
 # The key addressed by a request path like "$route/some.key.json"
 key_of(path, route) = HTTP.unescapeuri(chopsuffix(chopprefix(path, "$route/"), ".json"))
 
-function mock_discourse(state::Dict{String,Dict{String,String}}, things::Dict{String,String}, port)
+# The built-in flags every site lists, none of which is a mirrored entry
+const BUILTIN_FLAGS = [
+    Dict("id" => 2, "name" => "like", "is_flag" => false, "system" => true),
+    Dict("id" => 4, "name" => "Inappropriate", "description" => "This post contains content that ...",
+         "applies_to" => ["Post", "Topic"], "require_message" => false, "enabled" => true,
+         "auto_action_type" => true, "is_flag" => true, "system" => true, "is_used" => true)]
+
+function mock_discourse(state::Dict{String,Dict{String,String}}, things::Dict{String,String},
+                        flags::Dict{Int,Dict{String,Any}}, port)
     st = "/admin/customize/site_texts"
     mt = "/admin/mock_things"
+    ft = "/admin/config/flags"
     return HTTP.serve!("127.0.0.1", port) do req
         uri = HTTP.URI(req.target)
         path = uri.path
         qp = HTTP.queryparams(uri)
+
+        if path == "/site.json"
+            custom = [merge(f, Dict("id" => id, "is_flag" => true, "system" => false, "is_used" => false))
+                      for (id, f) in sort!(collect(flags); by = first)]
+            return HTTP.Response(200, JSON.json(Dict("default_locale" => "en",
+                "post_action_types" => [BUILTIN_FLAGS; custom])))
+        end
+
+        if startswith(path, ft)
+            # the flags API takes and returns JSON records, addressed by id
+            HTTP.header(req, "Content-Type") == "application/json" || req.method == "DELETE" ||
+                return HTTP.Response(400, "expected a JSON body")
+            if req.method == "POST" && path == ft
+                id = maximum(keys(flags); init = 1000) + 1
+                flags[id] = JSON.parse(String(req.body))
+                return HTTP.Response(200, JSON.json(Dict("flag" => merge(flags[id], Dict("id" => id)))))
+            end
+            id = tryparse(Int, chopprefix(path, "$ft/"))
+            (isnothing(id) || !haskey(flags, id)) && return HTTP.Response(404, "no such flag")
+            if req.method == "PUT"
+                flags[id] = JSON.parse(String(req.body))
+                return HTTP.Response(200, JSON.json(Dict("flag" => merge(flags[id], Dict("id" => id)))))
+            elseif req.method == "DELETE"
+                delete!(flags, id)
+                return HTTP.Response(200, JSON.json(Dict("success" => "OK")))
+            end
+        end
 
         if path == "/admin/site_settings.json"
             return HTTP.Response(200, JSON.json(Dict("site_settings" => [
@@ -88,7 +125,25 @@ const PORT = 8397
 const ROUTE = "admin/customize/site_texts"
 state = Dict{String,Dict{String,String}}()
 things = Dict{String,String}()
-server = mock_discourse(state, things, PORT)
+flags = Dict{Int,Dict{String,Any}}()
+server = mock_discourse(state, things, flags, PORT)
+
+const SPAM_LINK = Dict{String,Any}("name" => "Spam link", "description" => "Links to a spam site",
+    "applies_to" => ["Post", "Topic"], "require_message" => false, "enabled" => true,
+    "auto_action_type" => false)
+const SPAM_LINK_FILE = """
+{
+  "name": "Spam link",
+  "description": "Links to a spam site",
+  "applies_to": [
+    "Post",
+    "Topic"
+  ],
+  "require_message": false,
+  "enabled": true,
+  "auto_action_type": false
+}
+"""
 client = Client(base_url = "http://127.0.0.1:$PORT", api_key = "test-key", api_user = "test-user")
 
 en() = get!(state, "en", Dict{String,String}())
@@ -103,6 +158,9 @@ fr() = get!(state, "fr", Dict{String,String}())
         # any other filename is itself the key of a locale-less entry
         @test entry_for("admin/site_settings/title.txt") == ("admin/site_settings", "title", nothing)
         @test entry_for("admin/site_settings/some.dotted.key.txt") == ("admin/site_settings", "some.dotted.key", nothing)
+        # a flag is addressed by its id, and any other name is a flag to create
+        @test entry_for("$FLAGS/1001.json") == (FLAGS, "1001", nothing)
+        @test entry_for("$FLAGS/spam-link.json") == (FLAGS, "spam-link", nothing)
 
         # the form/JSON name is the singular of the route's last segment
         @test singular(ROUTE) == "site_text"
@@ -185,6 +243,44 @@ fr() = get!(state, "fr", Dict{String,String}())
                 @test sort(readdir(ROUTE)) == [".gitkeep", "added.body", "doc.key", "one.key"]
                 # the locale-less route mirrors flat files
                 @test read("admin/mock_things/thing.a.txt", String) == "a value"
+            end
+        end
+    end
+
+    @testset "flags" begin
+        empty!(flags)
+        flags[1001] = copy(SPAM_LINK)
+
+        # only custom flags are entries: keyed by id, valued by the canonical
+        # JSON of their settable fields
+        @test entries(client, FLAGS) == ["1001" => SPAM_LINK_FILE]
+        @test JSON.parse(SPAM_LINK_FILE) == SPAM_LINK
+
+        mktempdir() do dir
+            cd(dir) do
+                mkpath(FLAGS); write("$FLAGS/.gitkeep", "")
+                write("$FLAGS/1001.json", "stale")
+                pull!(client)
+                @test read("$FLAGS/1001.json", String) == SPAM_LINK_FILE
+                @test sort(readdir(FLAGS)) == [".gitkeep", "1001.json"]
+
+                # an id-named file updates that flag; any other name creates one
+                apply!(client, ["$FLAGS/1001.json" => JSON.json(merge(SPAM_LINK, Dict("enabled" => false))),
+                                "$FLAGS/off-topic-link.json" => JSON.json(merge(SPAM_LINK, Dict("name" => "Off-topic link")))])
+                @test flags[1001]["enabled"] == false
+                @test flags[1002]["name"] == "Off-topic link"
+
+                # the following pull re-files the new flag under its assigned id
+                write("$FLAGS/off-topic-link.json", "as committed")
+                pull!(client)
+                @test sort(readdir(FLAGS)) == [".gitkeep", "1001.json", "1002.json"]
+                @test JSON.parse(read("$FLAGS/1002.json", String))["name"] == "Off-topic link"
+
+                # deleting the file deletes the flag
+                apply!(client, ["$FLAGS/1002.json" => nothing])
+                @test !haskey(flags, 1002)
+                # as does an update to an id the site doesn't have
+                @test_throws HTTP.StatusError apply!(client, ["$FLAGS/1234.json" => SPAM_LINK_FILE])
             end
         end
     end

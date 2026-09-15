@@ -9,8 +9,9 @@ route. An entry on a localized route is `route/key/locale.ext` (e.g.
 `admin/customize/site_texts/guidelines_topic.body/en.md`); an entry on
 a locale-less route is simply `route/key.ext`. The extension is only
 for display on GitHub. Pulling mirrors every locale the site has
-entries in, so a new route needs nothing but its (`.gitkeep`-held)
-directory.
+entries in, so a new key/value route needs nothing but its
+(`.gitkeep`-held) directory. The one route that isn't a key/value store
+is [`FLAGS`](@ref), whose entries are JSON records keyed by id.
 
 The two CLI entry points used by the GitHub workflows are
 [`main_pull`](@ref) (mirror the live state into the repository) and
@@ -102,10 +103,18 @@ get_value(c::Client, route, key; locale = nothing) =
 Create or update the configuration of `key` on the `route` endpoint.
 """
 function set_value!(c::Client, route, key, value; locale = nothing)
-    form = Dict("$(singular(route))[value]" => value)
-    isnothing(locale) || (form["$(singular(route))[locale]"] = locale)
-    # HTTP form-encodes a Dict body and sets the Content-Type itself
-    HTTP.put(endpoint(c, route, key); headers = auth_headers(c), body = form)
+    if route == FLAGS
+        # A file named by an id updates that flag; any other name creates a new
+        # one, which the following pull re-files under the id Discourse assigns
+        headers = [auth_headers(c); "Content-Type" => "application/json"]
+        all(isdigit, key) ? HTTP.put(endpoint(c, route, key); headers, body = value) :
+                            HTTP.post(endpoint(c, route); headers, body = value)
+    else
+        form = Dict("$(singular(route))[value]" => value)
+        isnothing(locale) || (form["$(singular(route))[locale]"] = locale)
+        # HTTP form-encodes a Dict body and sets the Content-Type itself
+        HTTP.put(endpoint(c, route, key); headers = auth_headers(c), body = form)
+    end
     return nothing
 end
 
@@ -132,6 +141,30 @@ function available_locales(c::Client)
     isnothing(i) && error("could not determine the available locales from the site settings")
     return String[v["value"] for v in settings[i]["valid_values"]]
 end
+
+# Custom flags are records rather than strings, addressed by the integer id
+# Discourse assigns at creation. They aren't listed at their own route:
+# /site.json carries every flag, built-in and custom alike, with its full
+# record. An entry's value is the JSON object the admin UI sends to create or
+# update a flag, i.e. exactly its settable fields.
+const FLAGS = "admin/config/flags"
+const FLAG_FIELDS = (:name, :description, :applies_to, :require_message, :enabled, :auto_action_type)
+
+flag_entries(c::Client) =
+    [string(f["id"]) => flag_value(f)
+     for f in get_json(c, "$(c.base_url)/site.json")["post_action_types"]
+     if f["is_flag"] && !f["system"]]
+
+# The canonical file form of a flag: its settable fields, in a fixed order
+flag_value(f) = JSON.json(NamedTuple{FLAG_FIELDS}(Tuple(f[String(k)] for k in FLAG_FIELDS)), 2) * "\n"
+
+"""
+    entries(c::Client, route; locale=nothing) -> Vector{Pair{String,String}}
+
+The key and current value of every entry configured on the `route` endpoint.
+"""
+entries(c::Client, route; locale = nothing) = route == FLAGS ? flag_entries(c) :
+    [key => get_value(c, route, key; locale) for key in configured_keys(c, route; locale)]
 
 # ---------------------------------------------------------------------------
 # Repository conventions
@@ -166,7 +199,8 @@ end
 
 # The inverse of entry_for, used for keys that don't have a file yet
 file_for(route, key, locale) =
-    isnothing(locale) ? joinpath(route, "$key.txt") : joinpath(route, key, "$locale.txt")
+    isnothing(locale) ? joinpath(route, "$key.$(route == FLAGS ? "json" : "txt")") :
+                        joinpath(route, key, "$locale.txt")
 
 """
     config_routes() -> Vector{String}
@@ -224,21 +258,20 @@ function pull!(c::Client)
     for route in routes
         bylocale = existing_files(route)
         for locale in (localized(route) ? locales : [nothing])
-            keys = configured_keys(c, route; locale)
+            live = entries(c, route; locale)
             existing = get(bylocale, locale, Dict{String,String}())
             # nothing configured and nothing lingering to clean up
-            isempty(keys) && isempty(existing) && continue
-            mirror!(c, route, locale, keys, existing)
+            isempty(live) && isempty(existing) && continue
+            mirror!(route, locale, live, existing)
         end
     end
     return nothing
 end
 
-function mirror!(c::Client, route, locale, keys, existing)
-    println("🔍 Found $(length(keys)) configured entries in $route$(isnothing(locale) ? "" : " ($locale)")")
+function mirror!(route, locale, live, existing)
+    println("🔍 Found $(length(live)) configured entries in $route$(isnothing(locale) ? "" : " ($locale)")")
 
-    for key in keys
-        value = get_value(c, route, key; locale)
+    for (key, value) in live
         file = get(() -> file_for(route, key, locale), existing, key)
         current = isfile(file) ? read(file, String) : nothing
         if current != value
@@ -252,7 +285,7 @@ function mirror!(c::Client, route, locale, keys, existing)
 
     # Remove files whose entries are no longer configured on Discourse
     for (key, file) in existing
-        if key ∉ keys
+        if key ∉ first.(live)
             rm(file)
             println("🗑️  Removed $file (no longer configured)")
             # and the key directory, once its last translation is gone

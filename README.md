@@ -8,13 +8,17 @@ Discourse has a very simple admin API with each route describing a group of sett
 
 The [Site Texts feature of Discourse](https://meta.discourse.org/t/customize-text-in-discourse/36092) allows overriding (and optionally translating) pretty much every and any text that appears on the platform. These can range from very short slugs (like date formats) to long form (and crucially critical) community resources like the site guidelines. One special thing about site texts is that they are localized and may have multiple values at a single key.
 
+### Custom Flags
+
+The [custom flags feature of Discourse](https://meta.discourse.org/t/custom-flags/312964) allows adding your own reasons for flagging a post or topic, alongside the built-in ones (off-topic, inappropriate, spam, and so on). Unlike the other settings, a flag is a record rather than a single string, so its file holds a JSON object of exactly the fields the admin UI lets you set: `name`, `description`, `applies_to`, `require_message`, `enabled`, and `auto_action_type`. Discourse addresses a flag by the integer id it assigns at creation, and the file is named by that id (`admin/config/flags/1001.json`). To create a flag, add a file with any other name; the pull following the push re-files it under its new id. Only custom flags are mirrored: the built-in flags can't be created, edited, or deleted through this API. A custom flag that has been used can be edited but can no longer be deleted.
+
 ## How it works
 
-The repository's `admin/` tree mirrors the API routes of the same paths, so supporting another endpoint is a matter of making the directory and a `.gitkeep`. The currently-overriden settings at that endpoint will be populated upon merge to main.
+The repository's `admin/` tree mirrors the API routes of the same paths, so supporting another key/value endpoint is a matter of making the directory and a `.gitkeep`. The currently-overriden settings at that endpoint will be populated upon merge to main.
 
 An entry on a locale-less route is simply `admin/route/key.ext`. For a localized route (just `site_texts`) it's `route/key/locale.ext`; `admin/customize/site_texts/guidelines_topic.body/en.md` holds the `en` translation of that key.
 
-Extensions are (currently) only for display on GitHub; the contents of the file are simply plaintext. This may at some point support `json` or `toml` formats for more complicated endpoints.
+Extensions are only for display on GitHub; the contents of the file are sent to Discourse verbatim as the entry's value. For the key/value routes that is plaintext; for custom flags it is the JSON record described above.
 
 ### Pull from Discourse
 
