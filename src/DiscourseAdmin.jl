@@ -139,11 +139,16 @@ end
 Every locale the instance supports, read from the `default_locale` site
 setting's valid values.
 """
-function available_locales(c::Client)
+available_locales(c::Client) = String[v["value"] for v in locale_setting(c)["valid_values"]]
+
+"The locale the site's posts are written in, unless they say otherwise."
+default_locale(c::Client) = locale_setting(c)["value"]::String
+
+function locale_setting(c::Client)
     settings = get_json(c, "$(c.base_url)/admin/site_settings.json")["site_settings"]
     i = findfirst(s -> s["setting"] == "default_locale", settings)
-    isnothing(i) && error("could not determine the available locales from the site settings")
-    return String[v["value"] for v in settings[i]["valid_values"]]
+    isnothing(i) && error("could not find the default_locale among the site settings")
+    return settings[i]
 end
 
 # Custom flags are records rather than strings, addressed by the integer id
@@ -272,9 +277,6 @@ function post_for(file)
 end
 
 is_post(file) = first(splitpath(file)) == POSTS
-
-"The locale the site's posts are written in, unless they say otherwise."
-default_locale(c::Client) = get_json(c, "$(c.base_url)/site.json")["default_locale"]::String
 
 """
     get_post(c::Client, topic_id) -> Dict

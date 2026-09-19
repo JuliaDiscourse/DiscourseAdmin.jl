@@ -49,7 +49,7 @@ function mock_discourse(state::Dict{String,Dict{String,String}}, things::Dict{St
         if path == "/site.json"
             custom = [merge(f, Dict("id" => id, "is_flag" => true, "system" => false, "is_used" => false))
                       for (id, f) in sort!(collect(flags); by = first)]
-            return HTTP.Response(200, JSON.json(Dict("default_locale" => "en",
+            return HTTP.Response(200, JSON.json(Dict(
                 "post_action_types" => [BUILTIN_FLAGS; custom])))
         end
 
