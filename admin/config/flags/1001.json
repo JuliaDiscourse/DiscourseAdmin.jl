@@ -1,0 +1,11 @@
+{
+  "name": "Custom Flag",
+  "description": "This is the description",
+  "applies_to": [
+    "Post",
+    "Topic"
+  ],
+  "require_message": false,
+  "enabled": false,
+  "auto_action_type": false
+}
