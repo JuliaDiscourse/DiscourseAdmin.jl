@@ -1,7 +1,7 @@
 using DiscourseAdmin
 using DiscourseAdmin: singular, entry_for, config_routes, existing_files, available_locales,
                       configured_keys, get_value, set_value!, reset_value!, entries, FLAGS,
-                      pull!, file_changes, apply!, git, post_for, topic_for, get_post, set_post!
+                      pull!, file_changes, apply!, git, post_for, get_post, localizations
 using HTTP
 using JSON
 using Test
@@ -14,9 +14,13 @@ using Test
 # flags in site.json). The site texts listing paginates like the real one
 # (but with a tiny page size so the tests routinely cross page boundaries).
 # Posts are found by topic id and post number but edited by their own id,
-# and have the whitespace around their bodies stripped.
+# and have the whitespace around their bodies stripped. Their translations
+# are stored verbatim by post id and locale, and are forbidden entirely
+# unless content localization is enabled.
 
 const POSTS_BY_ID = Dict{Int,Dict{String,Any}}()
+const LOCALIZATIONS = Dict{Int,Dict{String,String}}()
+const LOCALIZATION_ENABLED = Ref(true)
 const LAST_EDIT_REASON = Ref("")
 
 const PAGE_SIZE = 2
@@ -66,6 +70,26 @@ function mock_discourse(state::Dict{String,Dict{String,String}}, things::Dict{St
             elseif req.method == "DELETE"
                 delete!(flags, id)
                 return HTTP.Response(200, JSON.json(Dict("success" => "OK")))
+            end
+        end
+
+        if startswith(path, "/post_localizations/")
+            LOCALIZATION_ENABLED[] || return HTTP.Response(403, "content localization is disabled")
+            form = req.method == "POST" ? HTTP.queryparams(String(req.body)) : qp
+            id = tryparse(Int, get(form, "post_id", key_of(path, "/post_localizations")))
+            haskey(POSTS_BY_ID, id) || return HTTP.Response(404, "no such post")
+            ls = get!(LOCALIZATIONS, id, Dict{String,String}())
+            if req.method == "GET"
+                return HTTP.Response(200, JSON.json(Dict("post_localizations" =>
+                    [Dict("post_id" => id, "locale" => l, "raw" => ls[l]) for l in sort!(collect(keys(ls)))])))
+            elseif req.method == "POST" && path == "/post_localizations/create_or_update"
+                status = haskey(ls, form["locale"]) ? 200 : 201
+                ls[form["locale"]] = form["raw"]
+                return HTTP.Response(status, JSON.json(Dict("success" => "OK")))
+            elseif req.method == "DELETE" && path == "/post_localizations/destroy"
+                haskey(ls, form["locale"]) || return HTTP.Response(404, "no such localization")
+                delete!(ls, form["locale"])
+                return HTTP.Response(204)
             end
         end
 
@@ -314,11 +338,7 @@ fr() = get!(state, "fr", Dict{String,String}())
         @test_throws ErrorException post_for("t/5/en.md")
         @test_throws ErrorException post_for("t/faq-guidelines/five/en.md")
         @test_throws ErrorException post_for("t/faq-guidelines/5/3.md")
-        # only the post itself is supported; other locales await translations
-        @test topic_for("t/faq-guidelines/5/en.md", "en") == 5
-        @test_throws ErrorException topic_for("t/faq-guidelines/5/fr.md", "en")
-
-        empty!(POSTS_BY_ID)
+        empty!(POSTS_BY_ID); empty!(LOCALIZATIONS); LOCALIZATION_ENABLED[] = true
         POSTS_BY_ID[11] = Dict("id" => 11, "topic_id" => 5, "post_number" => 1, "raw" => "Be kind.")
         POSTS_BY_ID[42] = Dict("id" => 42, "topic_id" => 5, "post_number" => 3, "raw" => "A reply")
         @test get_post(client, 5)["id"] == 11
@@ -341,13 +361,10 @@ fr() = get!(state, "fr", Dict{String,String}())
                 @test read("t/a-reply-less-slug/5/en.txt", String) == "Be kind.\n"
                 rm("t/a-reply-less-slug"; recursive = true)
 
-                # misplaced files and translations are errors
+                # misplaced files are errors
                 write("t/faq-guidelines/stray.md", "")
                 @test_throws ErrorException pull!(client)
                 rm("t/faq-guidelines/stray.md")
-                write("t/faq-guidelines/5/fr.md", "")
-                @test_throws ErrorException pull!(client)
-                rm("t/faq-guidelines/5/fr.md")
 
                 # an edit finds the post's id, and round-trips through the pull
                 withenv("GITHUB_SHA" => "abc123", "GITHUB_REPOSITORY" => "org/repo", "GITHUB_SERVER_URL" => nothing) do
@@ -360,9 +377,50 @@ fr() = get!(state, "fr", Dict{String,String}())
                 pull!(client)
                 @test read("t/faq-guidelines/5/en.md", String) == "Be kind.\n\nAnd curious.\n"
 
-                # a translation is refused before anything is sent
-                @test_throws ErrorException apply!(client, ["t/faq-guidelines/5/fr.md" => "Soyez gentils."])
+                # any other locale is a translation: created, updated, and
+                # stored verbatim, leaving the post itself alone
+                apply!(client, ["t/faq-guidelines/5/fr.md" => "Soyez gentils.\n"])
+                apply!(client, ["t/faq-guidelines/5/fr.md" => "Soyez gentils !\n",
+                                "t/faq-guidelines/5/pt_BR.md" => "Seja gentil."])
+                @test LOCALIZATIONS[11] == Dict("fr" => "Soyez gentils !\n", "pt_BR" => "Seja gentil.")
+                @test localizations(client, POSTS_BY_ID[11]) == ["fr" => "Soyez gentils !\n", "pt_BR" => "Seja gentil."]
                 @test POSTS_BY_ID[11]["raw"] == "Be kind.\n\nAnd curious."
+
+                # the pull mirrors the translations made on the site, too
+                write("t/faq-guidelines/5/fr.md", "stale")
+                pull!(client)
+                @test sort(readdir("t/faq-guidelines/5")) == [".gitkeep", "en.md", "fr.md", "pt_BR.md"]
+                @test read("t/faq-guidelines/5/fr.md", String) == "Soyez gentils !\n"
+                @test read("t/faq-guidelines/5/pt_BR.md", String) == "Seja gentil."
+
+                # deleting a translation's file deletes it; a post is never deleted
+                apply!(client, ["t/faq-guidelines/5/pt_BR.md" => nothing, "t/faq-guidelines/5/en.md" => nothing])
+                @test LOCALIZATIONS[11] == Dict("fr" => "Soyez gentils !\n")
+                @test POSTS_BY_ID[11]["raw"] == "Be kind.\n\nAnd curious."
+                pull!(client)
+                @test sort(readdir("t/faq-guidelines/5")) == [".gitkeep", "en.md", "fr.md"]
+
+                # a post that knows its own language is filed under it, so that
+                # the site's default locale becomes one of its translations
+                POSTS_BY_ID[11]["locale"] = "fr"
+                LOCALIZATIONS[11] = Dict("en" => "Be kind (translated).")
+                apply!(client, ["t/faq-guidelines/5/fr.md" => "Soyez gentils.\n"])
+                @test POSTS_BY_ID[11]["raw"] == "Soyez gentils."
+                pull!(client)
+                @test read("t/faq-guidelines/5/fr.md", String) == "Soyez gentils.\n"
+                @test read("t/faq-guidelines/5/en.md", String) == "Be kind (translated)."
+                POSTS_BY_ID[11]["locale"] = ""
+                POSTS_BY_ID[11]["raw"] = "Be kind."
+
+                # without content localization there are no translations to
+                # mirror, and pushing one fails
+                LOCALIZATION_ENABLED[] = false
+                @test localizations(client, POSTS_BY_ID[11]) == []
+                @test_throws HTTP.StatusError apply!(client, ["t/faq-guidelines/5/de.md" => "Seid nett."])
+                pull!(client)
+                @test sort(readdir("t/faq-guidelines/5")) == [".gitkeep", "en.md"]
+                @test read("t/faq-guidelines/5/en.md", String) == "Be kind.\n"
+                LOCALIZATION_ENABLED[] = true
 
                 # a post that doesn't exist is an error, not a creation
                 @test_throws HTTP.StatusError apply!(client, ["t/nope/6/en.md" => "x"])
@@ -402,7 +460,7 @@ fr() = get!(state, "fr", Dict{String,String}())
                 @test file_changes("$c1..$c3") == ["$ROUTE/one.key/en.txt" => "v2"]
                 @test file_changes("HEAD~1..HEAD") == ["$ROUTE/two.key/en.txt" => nothing]
 
-                # adding or deleting a post's file only starts or stops mirroring it
+                # adding or deleting a topic's directory only starts or stops mirroring it
                 mkpath("t/faq/5"); mkpath("t/faq/6"); write("t/faq/5/en.md", ""); write("t/faq/6/en.md", "six")
                 mkpath("t/faq/7"); write("t/faq/7/.gitkeep", "")
                 git("add", "-A"); git("commit", "-qm", "c4")
@@ -410,6 +468,14 @@ fr() = get!(state, "fr", Dict{String,String}())
                 write("t/faq/5/en.md", "edited"); rm("t/faq/6/en.md")
                 git("add", "-A"); git("commit", "-qm", "c5")
                 @test file_changes("HEAD~1..HEAD") == ["t/faq/5/en.md" => "edited"]
+
+                # within a mirrored topic, translations come and go like any entry
+                write("t/faq/5/fr.md", "modifié"); write("t/faq/7/en.md", "seven")
+                git("add", "-A"); git("commit", "-qm", "c6")
+                @test file_changes("HEAD~1..HEAD") == ["t/faq/5/fr.md" => "modifié", "t/faq/7/en.md" => "seven"]
+                rm("t/faq/5/fr.md")
+                git("add", "-A"); git("commit", "-qm", "c7")
+                @test file_changes("HEAD~1..HEAD") == ["t/faq/5/fr.md" => nothing]
             end
         end
     end

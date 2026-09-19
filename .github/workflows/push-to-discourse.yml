@@ -57,12 +57,13 @@ jobs:
         DIRS=$(git ls-tree -r --name-only "$BEFORE_SHA" -- admin |
                julia --project=. -e 'using DiscourseAdmin: entry_for; foreach(f -> println(entry_for(f)[1]), eachline())' |
                sort -u)
-        # Posts (under t/) are declared by their files rather than listed by
-        # the site, so there only a modified file is drift: an added or deleted one is
-        # this change starting or stopping to mirror a post
-        POSTS=$(git diff --cached --name-only --diff-filter=M "$BEFORE_SHA" -- t)
-        if { [ -n "$DIRS" ] && ! git diff --cached --quiet "$BEFORE_SHA" -- $DIRS; } || [ -n "$POSTS" ]; then
-          git diff --cached --stat "$BEFORE_SHA" -- $DIRS $POSTS
+        # Likewise for posts (under t/), where it's the topic directories that
+        # declare what is mirrored: one this change adds has no prior state,
+        # and one it removes is no longer pulled
+        topics() { git ls-tree -r --name-only "$1" -- t | xargs -r -n1 dirname | sort -u; }
+        DIRS="$DIRS $(comm -12 <(topics "$BEFORE_SHA") <(topics HEAD))"
+        if [ -n "${DIRS// }" ] && ! git diff --cached --quiet "$BEFORE_SHA" -- $DIRS; then
+          git diff --cached --stat "$BEFORE_SHA" -- $DIRS
           echo "::error::The repository does not reflect the current Discourse state. The pull job will re-sync it automatically; then rebase and re-land this change."
           exit 1
         fi
