@@ -13,6 +13,9 @@ entries in, so a new key/value route needs nothing but its
 (`.gitkeep`-held) directory. The one route that isn't a key/value store
 is [`FLAGS`](@ref), whose entries are JSON records keyed by id.
 
+Beyond the admin settings, the `t/**` tree holds the bodies of specific
+[posts](@ref post_for), at the paths of their topics' URLs.
+
 The two CLI entry points used by the GitHub workflows are
 [`main_pull`](@ref) (mirror the live state into the repository) and
 [`main_push`](@ref) (apply committed changes to the live site).
@@ -242,6 +245,87 @@ end
 existing_files(route, locale) = get(existing_files(route), locale, Dict{String,String}())
 
 # ---------------------------------------------------------------------------
+# Posts: the bodies of specific posts, like the FAQ/Guidelines topic
+
+"The repository directory mirroring topic URLs."
+const POSTS = "t"
+
+"The top-level directories this package syncs."
+const ROOTS = (ROOT, POSTS)
+
+"""
+    post_for(file) -> (topic_id, post_number)
+
+The post a file under `t/` manages, following the URL of its topic:
+`t/faq-guidelines/5.md` is the first post of topic 5 (at `/t/faq-guidelines/5`),
+and `t/faq-guidelines/5/3.md` is the third post in it (`/t/faq-guidelines/5/3`).
+The slug is, as in the URL, only decorative.
+"""
+function post_for(file)
+    parts = splitpath(replace(file, DISPLAY_EXTENSION => ""))
+    ids = [tryparse(Int, p) for p in parts[3:end]]
+    (parts[1] == POSTS && length(ids) in 1:2 && !any(isnothing, ids)) ||
+        error("$file doesn't name a post: expected $POSTS/slug/topic_id.md or $POSTS/slug/topic_id/post_number.md")
+    return (ids[1], get(ids, 2, 1))
+end
+
+"""
+    get_post(c::Client, topic_id, post_number) -> Dict
+
+The post at `/t/-/topic_id/post_number`, with its `id` and `raw` markdown source.
+"""
+get_post(c::Client, topic_id, post_number) =
+    get_json(c, "$(c.base_url)/posts/by_number/$topic_id/$post_number.json")
+
+# Discourse strips the whitespace surrounding a post, so the canonical file
+# form is the body with a single trailing newline.
+post_value(post) = String(strip(post["raw"])) * "\n"
+
+"""
+    set_post!(c::Client, topic_id, post_number, raw; edit_reason="")
+
+Edit the body of an existing post, as a new revision with the given reason.
+"""
+function set_post!(c::Client, topic_id, post_number, raw; edit_reason = "")
+    id = get_post(c, topic_id, post_number)["id"]
+    HTTP.put("$(c.base_url)/posts/$id.json"; headers = auth_headers(c),
+             body = Dict("post[raw]" => raw, "post[edit_reason]" => edit_reason))
+    return nothing
+end
+
+# On GitHub Actions, a revision's edit reason links to the commit it came from
+edit_reason() = haskey(ENV, "GITHUB_SHA") ?
+    "$(get(ENV, "GITHUB_SERVER_URL", "https://github.com"))/$(get(ENV, "GITHUB_REPOSITORY", ""))/commit/$(ENV["GITHUB_SHA"])" : ""
+
+"""
+    post_files() -> Vector{String}
+
+The post files of the repository. Unlike an admin route, where the site
+lists what is configured, it's these files that declare which posts are
+mirrored.
+"""
+post_files() = isdir(POSTS) ? sort!([joinpath(path, f) for (path, _, files) in walkdir(POSTS)
+                                     for f in files if !hidden(f)]) : String[]
+
+"""
+    pull_posts!(c::Client)
+
+Mirror the live body of every post in [`post_files`](@ref) into its file.
+"""
+function pull_posts!(c::Client)
+    for file in post_files()
+        value = post_value(get_post(c, post_for(file)...))
+        if read(file, String) != value
+            write(file, value)
+            println("📝 Updated $file")
+        else
+            println("✅ Unchanged $file")
+        end
+    end
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # Pull: mirror the live state into the repository
 
 """
@@ -265,6 +349,7 @@ function pull!(c::Client)
             mirror!(route, locale, live, existing)
         end
     end
+    pull_posts!(c)
     return nothing
 end
 
@@ -306,15 +391,21 @@ git(args...) = readchomp(Cmd(["git", args...]))
 
 The changed files in the git commit `range` paired with their new contents
 (read from the working tree, i.e. the range tip), where `nothing` indicates
-a deletion. Only files on routes under `admin/` are considered; dotfiles
-are ignored.
+a deletion. Only files on routes under `admin/` and posts under `t/` are
+considered; dotfiles are ignored. Adding or deleting a post's file only
+starts or stops mirroring it, so neither is a change to apply: the pull that
+follows fills an added file with the live body.
 """
 function file_changes(range)
     changes = Pair{String,Union{String,Nothing}}[]
     for line in eachsplit(git("diff", "--name-status", "--no-renames", range), '\n'; keepempty = false)
         status, file = split(line, '\t')
         parts = splitpath(file)
-        (length(parts) < 2 || first(parts) != ROOT || any(hidden, parts)) && continue
+        (length(parts) < 2 || first(parts) ∉ ROOTS || any(hidden, parts)) && continue
+        if first(parts) == POSTS && status != "M"
+            println("👀 $(status == "D" ? "No longer" : "Now") mirroring $file")
+            continue
+        end
         push!(changes, String(file) => status == "D" ? nothing : read(String(file), String))
     end
     return changes
@@ -329,6 +420,11 @@ namesake entry.
 function apply!(c::Client, changes)
     println("🔍 Sending $(length(changes)) updates:")
     for (file, content) in changes
+        if first(splitpath(file)) == POSTS
+            set_post!(c, post_for(file)..., content; edit_reason = edit_reason())
+            println("✅ Updated $file")
+            continue
+        end
         route, key, locale = entry_for(file)
         if isnothing(content)
             # Deleting the file reverts the entry to the Discourse default

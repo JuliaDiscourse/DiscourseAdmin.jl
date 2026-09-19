@@ -1,7 +1,7 @@
 using DiscourseAdmin
 using DiscourseAdmin: singular, entry_for, config_routes, existing_files, available_locales,
                       configured_keys, get_value, set_value!, reset_value!, entries, FLAGS,
-                      pull!, file_changes, apply!, git
+                      pull!, file_changes, apply!, git, post_for, get_post, set_post!
 using HTTP
 using JSON
 using Test
@@ -13,6 +13,11 @@ using Test
 # flags (JSON records addressed by id, listed alongside the built-in
 # flags in site.json). The site texts listing paginates like the real one
 # (but with a tiny page size so the tests routinely cross page boundaries).
+# Posts are found by topic id and post number but edited by their own id,
+# and have the whitespace around their bodies stripped.
+
+const POSTS_BY_ID = Dict{Int,Dict{String,Any}}()
+const LAST_EDIT_REASON = Ref("")
 
 const PAGE_SIZE = 2
 const LAST_PUT_LOCALE = Ref("")
@@ -61,6 +66,23 @@ function mock_discourse(state::Dict{String,Dict{String,String}}, things::Dict{St
             elseif req.method == "DELETE"
                 delete!(flags, id)
                 return HTTP.Response(200, JSON.json(Dict("success" => "OK")))
+            end
+        end
+
+        if startswith(path, "/posts/")
+            if req.method == "GET"
+                m = match(r"^/posts/by_number/(\d+)/(\d+)\.json$", path)
+                found = isnothing(m) ? [] : [p for p in values(POSTS_BY_ID)
+                    if (p["topic_id"], p["post_number"]) == Tuple(parse.(Int, m.captures))]
+                return isempty(found) ? HTTP.Response(404, "no such post") :
+                                        HTTP.Response(200, JSON.json(only(found)))
+            elseif req.method == "PUT"
+                id = tryparse(Int, key_of(path, "/posts"))
+                haskey(POSTS_BY_ID, id) || return HTTP.Response(404, "no such post")
+                form = HTTP.queryparams(String(req.body))
+                POSTS_BY_ID[id]["raw"] = strip(form["post[raw]"])
+                LAST_EDIT_REASON[] = form["post[edit_reason]"]
+                return HTTP.Response(200, JSON.json(Dict("post" => POSTS_BY_ID[id])))
             end
         end
 
@@ -285,6 +307,48 @@ fr() = get!(state, "fr", Dict{String,String}())
         end
     end
 
+    @testset "posts" begin
+        @test post_for("t/faq-guidelines/5.md") == (5, 1)
+        @test post_for("t/faq-guidelines/5/3.md") == (5, 3)
+        @test post_for("t/some-slug/5") == (5, 1)
+        @test_throws ErrorException post_for("t/5.md")
+        @test_throws ErrorException post_for("t/faq-guidelines/five.md")
+        @test_throws ErrorException post_for("t/faq-guidelines/5/3/1.md")
+
+        empty!(POSTS_BY_ID)
+        POSTS_BY_ID[11] = Dict("id" => 11, "topic_id" => 5, "post_number" => 1, "raw" => "Be kind.")
+        POSTS_BY_ID[42] = Dict("id" => 42, "topic_id" => 5, "post_number" => 3, "raw" => "A reply")
+        @test get_post(client, 5, 3)["id"] == 42
+
+        mktempdir() do dir
+            cd(dir) do
+                # the files declare which posts are mirrored; a new one may be empty
+                mkpath("t/faq-guidelines/5")
+                write("t/faq-guidelines/5.md", "")
+                write("t/faq-guidelines/5/3.md", "A reply\n")
+                pull!(client)
+                @test read("t/faq-guidelines/5.md", String) == "Be kind.\n"
+                @test read("t/faq-guidelines/5/3.md", String) == "A reply\n"
+
+                # an edit finds the post's id, and round-trips through the pull
+                withenv("GITHUB_SHA" => "abc123", "GITHUB_REPOSITORY" => "org/repo", "GITHUB_SERVER_URL" => nothing) do
+                    apply!(client, ["t/faq-guidelines/5.md" => "Be kind.\n\nAnd curious.\n"])
+                end
+                @test POSTS_BY_ID[11]["raw"] == "Be kind.\n\nAnd curious."
+                @test POSTS_BY_ID[42]["raw"] == "A reply"
+                @test LAST_EDIT_REASON[] == "https://github.com/org/repo/commit/abc123"
+                write("t/faq-guidelines/5.md", "Be kind.\n\nAnd curious.\n")
+                pull!(client)
+                @test read("t/faq-guidelines/5.md", String) == "Be kind.\n\nAnd curious.\n"
+
+                # a post that doesn't exist is an error, not a creation
+                @test_throws HTTP.StatusError apply!(client, ["t/nope/6.md" => "x"])
+                write("t/faq-guidelines/6.md", "")
+                @test_throws HTTP.StatusError pull!(client)
+            end
+        end
+    end
+
     @testset "file_changes" begin
         mktempdir() do dir
             cd(dir) do
@@ -314,6 +378,14 @@ fr() = get!(state, "fr", Dict{String,String}())
                 # two.key was added then deleted, so it nets out of the full span
                 @test file_changes("$c1..$c3") == ["$ROUTE/one.key/en.txt" => "v2"]
                 @test file_changes("HEAD~1..HEAD") == ["$ROUTE/two.key/en.txt" => nothing]
+
+                # adding or deleting a post's file only starts or stops mirroring it
+                mkpath("t/faq"); write("t/faq/5.md", ""); write("t/faq/6.md", "six")
+                git("add", "-A"); git("commit", "-qm", "c4")
+                @test file_changes("HEAD~1..HEAD") == []
+                write("t/faq/5.md", "edited"); rm("t/faq/6.md")
+                git("add", "-A"); git("commit", "-qm", "c5")
+                @test file_changes("HEAD~1..HEAD") == ["t/faq/5.md" => "edited"]
             end
         end
     end

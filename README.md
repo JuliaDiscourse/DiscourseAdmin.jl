@@ -12,6 +12,12 @@ The [Site Texts feature of Discourse](https://meta.discourse.org/t/customize-tex
 
 The [custom flags feature of Discourse](https://meta.discourse.org/t/custom-flags/312964) allows adding your own reasons for flagging a post or topic, alongside the built-in ones (off-topic, inappropriate, spam, and so on). Unlike the other settings, a flag is a record rather than a single string, so its file holds a JSON object of exactly the fields the admin UI lets you set: `name`, `description`, `applies_to`, `require_message`, `enabled`, and `auto_action_type`. Discourse addresses a flag by the integer id it assigns at creation, and the file is named by that id (`admin/config/flags/1001.json`). To create a flag, add a file with any other name; the pull following the push re-files it under its new id. Only custom flags are mirrored: the built-in flags can't be created, edited, or deleted through this API. A custom flag that has been used can be edited but can no longer be deleted.
 
+### Posts
+
+Some of the most prominent pages of a Discourse site are themselves posts, like the FAQ/Guidelines that lives in a hidden staff category. The `t/` tree holds the bodies of such posts at the paths of their URLs: [`t/faq-guidelines/5.md`](t/faq-guidelines/5.md) is the first post of the topic at [`/t/faq-guidelines/5`](https://discourse.julialang.org/t/faq-guidelines/5), and a `t/faq-guidelines/5/3.md` would be the third post in it. As in the URL, only the numbers matter; the slug is decorative.
+
+Unlike the admin settings, where Discourse lists what is configured, it's the files themselves that declare which posts are mirrored. To start mirroring a post, add an (empty) file for it; the pull following the push fills it with the post's current body, and only later changes to the file edit the post. Deleting a file just stops mirroring the post. Posts are never created or deleted, and only a post's body is managed, not its topic's title or category. Each edit is a regular post revision by the API user, with the commit's URL as its edit reason.
+
 ## How it works
 
 The repository's `admin/` tree mirrors the API routes of the same paths, so supporting another key/value endpoint is a matter of making the directory and a `.gitkeep`. The currently-overriden settings at that endpoint will be populated upon merge to main.
@@ -22,7 +28,7 @@ Extensions are only for display on GitHub; the contents of the file are sent to 
 
 ### Pull from Discourse
 
-The **Pull from Discourse** action mirrors the overrides for every configured route under `admin/` from the Discourse API. It runs on a daily schedule, on demand via manual dispatch, and automatically after every push run (see below). This captures changes made through the admin UI.
+The **Pull from Discourse** action mirrors the overrides for every configured route under `admin/` and every post under `t/` from the Discourse API. It runs on a daily schedule, on demand via manual dispatch, and automatically after every push run (see below). This captures changes made through the admin UI.
 
 ### Push to Discourse
 
