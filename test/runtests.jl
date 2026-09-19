@@ -1,7 +1,7 @@
 using DiscourseAdmin
 using DiscourseAdmin: singular, entry_for, config_routes, existing_files, available_locales,
                       configured_keys, get_value, set_value!, reset_value!, entries, FLAGS,
-                      pull!, file_changes, apply!, git, post_for, get_post, set_post!
+                      pull!, file_changes, apply!, git, post_for, topic_for, get_post, set_post!
 using HTTP
 using JSON
 using Test
@@ -308,42 +308,47 @@ fr() = get!(state, "fr", Dict{String,String}())
     end
 
     @testset "posts" begin
-        @test post_for("t/faq-guidelines/5.md") == (5, 1)
-        @test post_for("t/faq-guidelines/5/3.md") == (5, 3)
-        @test post_for("t/some-slug/5") == (5, 1)
-        @test_throws ErrorException post_for("t/5.md")
-        @test_throws ErrorException post_for("t/faq-guidelines/five.md")
-        @test_throws ErrorException post_for("t/faq-guidelines/5/3/1.md")
+        @test post_for("t/faq-guidelines/5/en.md") == (5, "en")
+        @test post_for("t/some-slug/5/pt_BR") == (5, "pt_BR")
+        @test_throws ErrorException post_for("t/faq-guidelines/5.md")
+        @test_throws ErrorException post_for("t/5/en.md")
+        @test_throws ErrorException post_for("t/faq-guidelines/five/en.md")
+        @test_throws ErrorException post_for("t/faq-guidelines/5/3.md")
+        # only the post itself is supported; other locales await translations
+        @test topic_for("t/faq-guidelines/5/en.md", "en") == 5
+        @test_throws ErrorException topic_for("t/faq-guidelines/5/fr.md", "en")
 
         empty!(POSTS_BY_ID)
         POSTS_BY_ID[11] = Dict("id" => 11, "topic_id" => 5, "post_number" => 1, "raw" => "Be kind.")
         POSTS_BY_ID[42] = Dict("id" => 42, "topic_id" => 5, "post_number" => 3, "raw" => "A reply")
-        @test get_post(client, 5, 3)["id"] == 42
+        @test get_post(client, 5)["id"] == 11
 
         mktempdir() do dir
             cd(dir) do
                 # the files declare which posts are mirrored; a new one may be empty
                 mkpath("t/faq-guidelines/5")
-                write("t/faq-guidelines/5.md", "")
-                write("t/faq-guidelines/5/3.md", "A reply\n")
+                write("t/faq-guidelines/5/en.md", "")
                 pull!(client)
-                @test read("t/faq-guidelines/5.md", String) == "Be kind.\n"
-                @test read("t/faq-guidelines/5/3.md", String) == "A reply\n"
+                @test read("t/faq-guidelines/5/en.md", String) == "Be kind.\n"
 
                 # an edit finds the post's id, and round-trips through the pull
                 withenv("GITHUB_SHA" => "abc123", "GITHUB_REPOSITORY" => "org/repo", "GITHUB_SERVER_URL" => nothing) do
-                    apply!(client, ["t/faq-guidelines/5.md" => "Be kind.\n\nAnd curious.\n"])
+                    apply!(client, ["t/faq-guidelines/5/en.md" => "Be kind.\n\nAnd curious.\n"])
                 end
                 @test POSTS_BY_ID[11]["raw"] == "Be kind.\n\nAnd curious."
                 @test POSTS_BY_ID[42]["raw"] == "A reply"
                 @test LAST_EDIT_REASON[] == "https://github.com/org/repo/commit/abc123"
-                write("t/faq-guidelines/5.md", "Be kind.\n\nAnd curious.\n")
+                write("t/faq-guidelines/5/en.md", "Be kind.\n\nAnd curious.\n")
                 pull!(client)
-                @test read("t/faq-guidelines/5.md", String) == "Be kind.\n\nAnd curious.\n"
+                @test read("t/faq-guidelines/5/en.md", String) == "Be kind.\n\nAnd curious.\n"
+
+                # a translation is refused before anything is sent
+                @test_throws ErrorException apply!(client, ["t/faq-guidelines/5/fr.md" => "Soyez gentils."])
+                @test POSTS_BY_ID[11]["raw"] == "Be kind.\n\nAnd curious."
 
                 # a post that doesn't exist is an error, not a creation
-                @test_throws HTTP.StatusError apply!(client, ["t/nope/6.md" => "x"])
-                write("t/faq-guidelines/6.md", "")
+                @test_throws HTTP.StatusError apply!(client, ["t/nope/6/en.md" => "x"])
+                mkpath("t/faq-guidelines/6"); write("t/faq-guidelines/6/en.md", "")
                 @test_throws HTTP.StatusError pull!(client)
             end
         end
@@ -380,12 +385,12 @@ fr() = get!(state, "fr", Dict{String,String}())
                 @test file_changes("HEAD~1..HEAD") == ["$ROUTE/two.key/en.txt" => nothing]
 
                 # adding or deleting a post's file only starts or stops mirroring it
-                mkpath("t/faq"); write("t/faq/5.md", ""); write("t/faq/6.md", "six")
+                mkpath("t/faq/5"); mkpath("t/faq/6"); write("t/faq/5/en.md", ""); write("t/faq/6/en.md", "six")
                 git("add", "-A"); git("commit", "-qm", "c4")
                 @test file_changes("HEAD~1..HEAD") == []
-                write("t/faq/5.md", "edited"); rm("t/faq/6.md")
+                write("t/faq/5/en.md", "edited"); rm("t/faq/6/en.md")
                 git("add", "-A"); git("commit", "-qm", "c5")
-                @test file_changes("HEAD~1..HEAD") == ["t/faq/5.md" => "edited"]
+                @test file_changes("HEAD~1..HEAD") == ["t/faq/5/en.md" => "edited"]
             end
         end
     end

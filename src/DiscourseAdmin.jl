@@ -254,40 +254,56 @@ const POSTS = "t"
 const ROOTS = (ROOT, POSTS)
 
 """
-    post_for(file) -> (topic_id, post_number)
+    post_for(file) -> (topic_id, locale)
 
-The post a file under `t/` manages, following the URL of its topic:
-`t/faq-guidelines/5.md` is the first post of topic 5 (at `/t/faq-guidelines/5`),
-and `t/faq-guidelines/5/3.md` is the third post in it (`/t/faq-guidelines/5/3`).
-The slug is, as in the URL, only decorative.
+The post a file under `t/` manages: `t/faq-guidelines/5/en.md` is the `en`
+text of the first post of topic 5, whose URL is `/t/faq-guidelines/5`. As in
+the URL, the slug is only decorative. Like a site text, it's the filename
+that names the locale.
 """
 function post_for(file)
     parts = splitpath(replace(file, DISPLAY_EXTENSION => ""))
-    ids = [tryparse(Int, p) for p in parts[3:end]]
-    (parts[1] == POSTS && length(ids) in 1:2 && !any(isnothing, ids)) ||
-        error("$file doesn't name a post: expected $POSTS/slug/topic_id.md or $POSTS/slug/topic_id/post_number.md")
-    return (ids[1], get(ids, 2, 1))
+    topic_id = length(parts) == 4 ? tryparse(Int, parts[3]) : nothing
+    (parts[1] == POSTS && !isnothing(topic_id) && occursin(LOCALE_SHAPE, parts[4])) ||
+        error("$file doesn't name a post: expected $POSTS/slug/topic_id/locale.md")
+    return (topic_id, parts[4])
+end
+
+"The locale the site's posts are written in; any other would be a translation."
+default_locale(c::Client) = get_json(c, "$(c.base_url)/site.json")["default_locale"]::String
+
+"""
+    topic_for(file, default) -> topic_id
+
+The topic whose first post `file` holds, given the site's `default` locale.
+Only that locale, i.e. the post itself, is supported; every other locale is
+reserved for the post's translations.
+"""
+function topic_for(file, default)
+    topic_id, locale = post_for(file)
+    locale == default ||
+        error("$file: translated posts aren't supported yet, only the site's default locale ($default)")
+    return topic_id
 end
 
 """
-    get_post(c::Client, topic_id, post_number) -> Dict
+    get_post(c::Client, topic_id) -> Dict
 
-The post at `/t/-/topic_id/post_number`, with its `id` and `raw` markdown source.
+The first post of a topic, with its `id` and `raw` markdown source.
 """
-get_post(c::Client, topic_id, post_number) =
-    get_json(c, "$(c.base_url)/posts/by_number/$topic_id/$post_number.json")
+get_post(c::Client, topic_id) = get_json(c, "$(c.base_url)/posts/by_number/$topic_id/1.json")
 
 # Discourse strips the whitespace surrounding a post, so the canonical file
 # form is the body with a single trailing newline.
 post_value(post) = String(strip(post["raw"])) * "\n"
 
 """
-    set_post!(c::Client, topic_id, post_number, raw; edit_reason="")
+    set_post!(c::Client, topic_id, raw; edit_reason="")
 
-Edit the body of an existing post, as a new revision with the given reason.
+Edit the body of a topic's first post, as a new revision with the given reason.
 """
-function set_post!(c::Client, topic_id, post_number, raw; edit_reason = "")
-    id = get_post(c, topic_id, post_number)["id"]
+function set_post!(c::Client, topic_id, raw; edit_reason = "")
+    id = get_post(c, topic_id)["id"]
     HTTP.put("$(c.base_url)/posts/$id.json"; headers = auth_headers(c),
              body = Dict("post[raw]" => raw, "post[edit_reason]" => edit_reason))
     return nothing
@@ -313,8 +329,11 @@ post_files() = isdir(POSTS) ? sort!([joinpath(path, f) for (path, _, files) in w
 Mirror the live body of every post in [`post_files`](@ref) into its file.
 """
 function pull_posts!(c::Client)
-    for file in post_files()
-        value = post_value(get_post(c, post_for(file)...))
+    files = post_files()
+    isempty(files) && return nothing
+    default = default_locale(c)
+    for file in files
+        value = post_value(get_post(c, topic_for(file, default)))
         if read(file, String) != value
             write(file, value)
             println("📝 Updated $file")
@@ -419,9 +438,11 @@ namesake entry.
 """
 function apply!(c::Client, changes)
     println("🔍 Sending $(length(changes)) updates:")
+    is_post(file) = first(splitpath(file)) == POSTS
+    default = any(is_post ∘ first, changes) ? default_locale(c) : nothing
     for (file, content) in changes
-        if first(splitpath(file)) == POSTS
-            set_post!(c, post_for(file)..., content; edit_reason = edit_reason())
+        if is_post(file)
+            set_post!(c, topic_for(file, default), content; edit_reason = edit_reason())
             println("✅ Updated $file")
             continue
         end
