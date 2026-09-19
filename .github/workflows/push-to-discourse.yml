@@ -50,14 +50,19 @@ jobs:
         git rev-parse -q --verify "$BEFORE_SHA^{commit}" >/dev/null 2>&1 || BEFORE_SHA=HEAD~1
         echo "BEFORE_SHA=$BEFORE_SHA" >> "$GITHUB_ENV"
         julia --project=. -e 'using DiscourseAdmin; DiscourseAdmin.main_pull()'
-        git add -A -- admin
+        git add -A -- admin $(git ls-files --error-unmatch t >/dev/null 2>&1 && echo t)
         # Only routes the prior state already tracks can meaningfully drift:
         # a route first introduced by this change has nothing to compare
         # against (the pull job mirrors its live entries afterwards)
         DIRS=$(git ls-tree -r --name-only "$BEFORE_SHA" -- admin |
                julia --project=. -e 'using DiscourseAdmin: entry_for; foreach(f -> println(entry_for(f)[1]), eachline())' |
                sort -u)
-        if [ -n "$DIRS" ] && ! git diff --cached --quiet "$BEFORE_SHA" -- $DIRS; then
+        # Likewise for posts (under t/), where it's the topic directories that
+        # declare what is mirrored: one this change adds has no prior state,
+        # and one it removes is no longer pulled
+        topics() { git ls-tree -r --name-only "$1" -- t | xargs -r -n1 dirname | sort -u; }
+        DIRS="$DIRS $(comm -12 <(topics "$BEFORE_SHA") <(topics HEAD))"
+        if [ -n "${DIRS// }" ] && ! git diff --cached --quiet "$BEFORE_SHA" -- $DIRS; then
           git diff --cached --stat "$BEFORE_SHA" -- $DIRS
           echo "::error::The repository does not reflect the current Discourse state. The pull job will re-sync it automatically; then rebase and re-land this change."
           exit 1

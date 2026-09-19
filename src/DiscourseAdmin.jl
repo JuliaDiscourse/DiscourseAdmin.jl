@@ -13,6 +13,10 @@ entries in, so a new key/value route needs nothing but its
 (`.gitkeep`-held) directory. The one route that isn't a key/value store
 is [`FLAGS`](@ref), whose entries are JSON records keyed by id.
 
+Beyond the admin settings, the `t/**` tree holds the bodies of specific
+[posts](@ref post_for) and their translations, at the paths of their topics'
+URLs.
+
 The two CLI entry points used by the GitHub workflows are
 [`main_pull`](@ref) (mirror the live state into the repository) and
 [`main_push`](@ref) (apply committed changes to the live site).
@@ -199,7 +203,7 @@ end
 
 # The inverse of entry_for, used for keys that don't have a file yet
 file_for(route, key, locale) =
-    isnothing(locale) ? joinpath(route, "$key.$(route == FLAGS ? "json" : "txt")") :
+    isnothing(locale) ? joinpath(route, "$key.$(route == FLAGS ? "json" : is_post(route) ? "md" : "txt")") :
                         joinpath(route, key, "$locale.txt")
 
 """
@@ -242,6 +246,137 @@ end
 existing_files(route, locale) = get(existing_files(route), locale, Dict{String,String}())
 
 # ---------------------------------------------------------------------------
+# Posts: the bodies of specific posts, like the FAQ/Guidelines topic
+
+"The repository directory mirroring topic URLs."
+const POSTS = "t"
+
+"The top-level directories this package syncs."
+const ROOTS = (ROOT, POSTS)
+
+"""
+    post_for(file) -> (topic_id, locale)
+
+The post a file under `t/` manages: `t/faq-guidelines/5/en.md` is the `en`
+text of the first post of topic 5, whose URL is `/t/faq-guidelines/5`. As in
+the URL, the slug is only decorative. Like a site text, it's the filename
+that names the locale: that of the post's own language is the post itself,
+and every other is one of its translations.
+"""
+function post_for(file)
+    parts = splitpath(replace(file, DISPLAY_EXTENSION => ""))
+    topic_id = length(parts) == 4 ? tryparse(Int, parts[3]) : nothing
+    (parts[1] == POSTS && !isnothing(topic_id) && occursin(LOCALE_SHAPE, parts[4])) ||
+        error("$file doesn't name a post: expected $POSTS/slug/topic_id/locale.md")
+    return (topic_id, parts[4])
+end
+
+is_post(file) = first(splitpath(file)) == POSTS
+
+"The locale the site's posts are written in, unless they say otherwise."
+default_locale(c::Client) = get_json(c, "$(c.base_url)/site.json")["default_locale"]::String
+
+"""
+    get_post(c::Client, topic_id) -> Dict
+
+The first post of a topic, with its `id` and `raw` markdown source.
+"""
+get_post(c::Client, topic_id) = get_json(c, "$(c.base_url)/posts/by_number/$topic_id/1.json")
+
+# A post only knows its own language once content localization has set it
+function post_locale(post, default)
+    locale = get(post, "locale", nothing)
+    return (isnothing(locale) || isempty(locale)) ? default : String(locale)
+end
+
+# Discourse strips the whitespace surrounding a post, so the canonical file
+# form is the body with a single trailing newline.
+post_value(post) = String(strip(post["raw"])) * "\n"
+
+"""
+    set_post!(c::Client, post, raw; edit_reason="")
+
+Edit the body of an existing post, as a new revision with the given reason.
+"""
+function set_post!(c::Client, post, raw; edit_reason = "")
+    HTTP.put("$(c.base_url)/posts/$(post["id"]).json"; headers = auth_headers(c),
+             body = Dict("post[raw]" => raw, "post[edit_reason]" => edit_reason))
+    return nothing
+end
+
+# On GitHub Actions, a revision's edit reason links to the commit it came from
+edit_reason() = haskey(ENV, "GITHUB_SHA") ?
+    "$(get(ENV, "GITHUB_SERVER_URL", "https://github.com"))/$(get(ENV, "GITHUB_REPOSITORY", ""))/commit/$(ENV["GITHUB_SHA"])" : ""
+
+"""
+    localizations(c::Client, post) -> Vector{Pair{String,String}}
+
+The locale and text of every translation of a post. Unlike a post, a
+translation is stored verbatim. A site without content localization (or an
+API user outside of `content_localization_allowed_groups`) has none.
+"""
+function localizations(c::Client, post)
+    data = try
+        get_json(c, "$(c.base_url)/post_localizations/$(post["id"]).json")
+    catch e
+        e isa HTTP.StatusError && e.status == 403 || rethrow()
+        return Pair{String,String}[]
+    end
+    return Pair{String,String}[l["locale"] => l["raw"] for l in data["post_localizations"]]
+end
+
+"""
+    set_localization!(c::Client, post, locale, raw)
+
+Create or update the `locale` translation of a post.
+"""
+function set_localization!(c::Client, post, locale, raw)
+    HTTP.post("$(c.base_url)/post_localizations/create_or_update"; headers = auth_headers(c),
+              body = Dict("post_id" => string(post["id"]), "locale" => locale, "raw" => raw))
+    return nothing
+end
+
+"""
+    delete_localization!(c::Client, post, locale)
+
+Delete the `locale` translation of a post.
+"""
+function delete_localization!(c::Client, post, locale)
+    HTTP.delete("$(c.base_url)/post_localizations/destroy"; headers = auth_headers(c),
+                query = ["post_id" => string(post["id"]), "locale" => locale])
+    return nothing
+end
+
+"""
+    post_dirs() -> Vector{String}
+
+The topic directories (`t/slug/topic_id`) of the repository. Unlike an admin
+route, where the site lists what is configured, it's these directories that
+declare which posts are mirrored; as with a route, a dotfile (like a
+`.gitkeep`) is enough to hold one that has yet to be populated.
+"""
+post_dirs() = isdir(POSTS) ? sort!([path for (path, _, files) in walkdir(POSTS) if !isempty(files)]) : String[]
+
+"""
+    pull_posts!(c::Client)
+
+Mirror the post of every topic in [`post_dirs`](@ref), and each of its
+translations, into the files of their locales.
+"""
+function pull_posts!(c::Client)
+    dirs = post_dirs()
+    isempty(dirs) && return nothing
+    default = default_locale(c)
+    for dir in dirs
+        topic_id, _ = post_for(joinpath(dir, default))
+        existing = Dict(post_for(joinpath(dir, f))[2] => joinpath(dir, f) for f in readdir(dir) if !hidden(f))
+        post = get_post(c, topic_id)
+        mirror!(dir, nothing, [post_locale(post, default) => post_value(post); localizations(c, post)], existing)
+    end
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # Pull: mirror the live state into the repository
 
 """
@@ -265,6 +400,7 @@ function pull!(c::Client)
             mirror!(route, locale, live, existing)
         end
     end
+    pull_posts!(c)
     return nothing
 end
 
@@ -306,15 +442,27 @@ git(args...) = readchomp(Cmd(["git", args...]))
 
 The changed files in the git commit `range` paired with their new contents
 (read from the working tree, i.e. the range tip), where `nothing` indicates
-a deletion. Only files on routes under `admin/` are considered; dotfiles
-are ignored.
+a deletion. Only files on routes under `admin/` and posts under `t/` are
+considered; dotfiles are ignored. Adding or deleting a whole topic directory
+under `t/` only starts or stops mirroring its post, so its files aren't
+changes to apply: the pull that follows populates an added directory.
 """
 function file_changes(range)
     changes = Pair{String,Union{String,Nothing}}[]
     for line in eachsplit(git("diff", "--name-status", "--no-renames", range), '\n'; keepempty = false)
         status, file = split(line, '\t')
         parts = splitpath(file)
-        (length(parts) < 2 || first(parts) != ROOT || any(hidden, parts)) && continue
+        (length(parts) < 2 || first(parts) ∉ ROOTS || any(hidden, parts)) && continue
+        if first(parts) == POSTS
+            dir = dirname(file)
+            if !isdir(dir) || isempty(readdir(dir))
+                println("👀 No longer mirroring $file")
+                continue
+            elseif isempty(git("ls-tree", "--name-only", first(split(range, "..")), "$dir/"))
+                println("👀 Now mirroring $file")
+                continue
+            end
+        end
         push!(changes, String(file) => status == "D" ? nothing : read(String(file), String))
     end
     return changes
@@ -328,7 +476,12 @@ namesake entry.
 """
 function apply!(c::Client, changes)
     println("🔍 Sending $(length(changes)) updates:")
+    default = any(is_post ∘ first, changes) ? default_locale(c) : nothing
     for (file, content) in changes
+        if is_post(file)
+            apply_post!(c, file, content, default)
+            continue
+        end
         route, key, locale = entry_for(file)
         if isnothing(content)
             # Deleting the file reverts the entry to the Discourse default
@@ -338,6 +491,28 @@ function apply!(c::Client, changes)
             set_value!(c, route, key, content; locale)
             println("✅ Updated $file")
         end
+    end
+    return nothing
+end
+
+# The file of a post's own locale is the post itself; any other is a translation
+function apply_post!(c::Client, file, content, default)
+    topic_id, locale = post_for(file)
+    post = get_post(c, topic_id)
+    if locale != post_locale(post, default)
+        if isnothing(content)
+            delete_localization!(c, post, locale)
+            println("🗑️  Deleted $file")
+        else
+            set_localization!(c, post, locale, content)
+            println("✅ Updated $file")
+        end
+    elseif isnothing(content)
+        # a post is never deleted; the following pull restores its file
+        println("⏭️  Kept the post of $file")
+    else
+        set_post!(c, post, content; edit_reason = edit_reason())
+        println("✅ Updated $file")
     end
     return nothing
 end
