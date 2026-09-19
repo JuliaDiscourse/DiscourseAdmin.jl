@@ -325,11 +325,29 @@ fr() = get!(state, "fr", Dict{String,String}())
 
         mktempdir() do dir
             cd(dir) do
-                # the files declare which posts are mirrored; a new one may be empty
+                # a topic's directory declares its post as mirrored, and the
+                # pull populates the site's default locale
                 mkpath("t/faq-guidelines/5")
-                write("t/faq-guidelines/5/en.md", "")
+                write("t/faq-guidelines/5/.gitkeep", "")
                 pull!(client)
+                @test sort(readdir("t/faq-guidelines/5")) == [".gitkeep", "en.md"]
                 @test read("t/faq-guidelines/5/en.md", String) == "Be kind.\n"
+
+                # an existing (even empty) file is filled, keeping its extension
+                mkpath("t/a-reply-less-slug/5")
+                write("t/a-reply-less-slug/5/en.txt", "")
+                pull!(client)
+                @test readdir("t/a-reply-less-slug/5") == ["en.txt"]
+                @test read("t/a-reply-less-slug/5/en.txt", String) == "Be kind.\n"
+                rm("t/a-reply-less-slug"; recursive = true)
+
+                # misplaced files and translations are errors
+                write("t/faq-guidelines/stray.md", "")
+                @test_throws ErrorException pull!(client)
+                rm("t/faq-guidelines/stray.md")
+                write("t/faq-guidelines/5/fr.md", "")
+                @test_throws ErrorException pull!(client)
+                rm("t/faq-guidelines/5/fr.md")
 
                 # an edit finds the post's id, and round-trips through the pull
                 withenv("GITHUB_SHA" => "abc123", "GITHUB_REPOSITORY" => "org/repo", "GITHUB_SERVER_URL" => nothing) do
@@ -348,7 +366,7 @@ fr() = get!(state, "fr", Dict{String,String}())
 
                 # a post that doesn't exist is an error, not a creation
                 @test_throws HTTP.StatusError apply!(client, ["t/nope/6/en.md" => "x"])
-                mkpath("t/faq-guidelines/6"); write("t/faq-guidelines/6/en.md", "")
+                mkpath("t/faq-guidelines/6"); write("t/faq-guidelines/6/.gitkeep", "")
                 @test_throws HTTP.StatusError pull!(client)
             end
         end
@@ -386,6 +404,7 @@ fr() = get!(state, "fr", Dict{String,String}())
 
                 # adding or deleting a post's file only starts or stops mirroring it
                 mkpath("t/faq/5"); mkpath("t/faq/6"); write("t/faq/5/en.md", ""); write("t/faq/6/en.md", "six")
+                mkpath("t/faq/7"); write("t/faq/7/.gitkeep", "")
                 git("add", "-A"); git("commit", "-qm", "c4")
                 @test file_changes("HEAD~1..HEAD") == []
                 write("t/faq/5/en.md", "edited"); rm("t/faq/6/en.md")

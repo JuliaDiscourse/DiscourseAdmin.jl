@@ -314,29 +314,36 @@ edit_reason() = haskey(ENV, "GITHUB_SHA") ?
     "$(get(ENV, "GITHUB_SERVER_URL", "https://github.com"))/$(get(ENV, "GITHUB_REPOSITORY", ""))/commit/$(ENV["GITHUB_SHA"])" : ""
 
 """
-    post_files() -> Vector{String}
+    post_dirs() -> Vector{String}
 
-The post files of the repository. Unlike an admin route, where the site
-lists what is configured, it's these files that declare which posts are
-mirrored.
+The topic directories (`t/slug/topic_id`) of the repository. Unlike an admin
+route, where the site lists what is configured, it's these directories that
+declare which posts are mirrored; as with a route, a dotfile (like a
+`.gitkeep`) is enough to hold one that has yet to be populated.
 """
-post_files() = isdir(POSTS) ? sort!([joinpath(path, f) for (path, _, files) in walkdir(POSTS)
-                                     for f in files if !hidden(f)]) : String[]
+post_dirs() = isdir(POSTS) ? sort!([path for (path, _, files) in walkdir(POSTS) if !isempty(files)]) : String[]
 
 """
     pull_posts!(c::Client)
 
-Mirror the live body of every post in [`post_files`](@ref) into its file.
+Mirror the live body of the post of every topic in [`post_dirs`](@ref) into
+its file for the site's default locale, adding that file if need be.
 """
 function pull_posts!(c::Client)
-    files = post_files()
-    isempty(files) && return nothing
+    dirs = post_dirs()
+    isempty(dirs) && return nothing
     default = default_locale(c)
-    for file in files
-        value = post_value(get_post(c, topic_for(file, default)))
-        if read(file, String) != value
+    for dir in dirs
+        # every file here must be of a supported locale (for now, the default)
+        files = [joinpath(dir, f) for f in readdir(dir) if !hidden(f)]
+        topic_id = only(unique!([topic_for(f, default) for f in [files; joinpath(dir, default)]]))
+        # an existing file keeps its display extension
+        file = isempty(files) ? joinpath(dir, "$default.md") : only(files)
+        value = post_value(get_post(c, topic_id))
+        current = isfile(file) ? read(file, String) : nothing
+        if current != value
             write(file, value)
-            println("📝 Updated $file")
+            println("📝 $(isnothing(current) ? "Added" : "Updated") $file")
         else
             println("✅ Unchanged $file")
         end
@@ -413,7 +420,7 @@ The changed files in the git commit `range` paired with their new contents
 a deletion. Only files on routes under `admin/` and posts under `t/` are
 considered; dotfiles are ignored. Adding or deleting a post's file only
 starts or stops mirroring it, so neither is a change to apply: the pull that
-follows fills an added file with the live body.
+follows populates an added topic directory with the live body.
 """
 function file_changes(range)
     changes = Pair{String,Union{String,Nothing}}[]
