@@ -4,7 +4,7 @@
 
 The Julia community is committed to maintaining a welcoming, respectful, and constructive environment. We expect the [Julia Community Standards](http://julialang.org/community/standards/) to be observed and upheld by all participants.
 
-The additional guidelines here are not hard and fast rules; they are merely aids to the human judgment of our community. 
+The additional guidelines here are not hard and fast rules; they are merely aids to the human judgment of our community.
 
 Please treat this discussion forum with the same respect you would a public park.  We, too, are building a shared community resource together &mdash; a place to share skills, knowledge, and interests through ongoing conversation. Use these guidelines to keep this a friendly, well-lighted place for respectful public discourse.
 
@@ -35,11 +35,13 @@ Instead, provide reasoned counter-arguments that improve the conversation.
 
 ## [Your Participation Counts](#participate)
 
-The conversations we have here set the tone for everyone. Help us influence the future of this community by choosing to engage in discussions that make this forum an interesting place to be &mdash; and avoiding those that do not.
+The conversations we have here set the tone for everyone, and by participating you become part of our community! Help us influence our future by choosing to engage in discussions that make this forum an interesting place to be &mdash; and avoiding those that do not.
+
+This is _your_ participation. We are here to talk to each other and we want to hear from you. Write your posts in your own words and voice, even if that's not English &mdash; we will automatically translate it for you. Do not directly post generative AI outputs, but you can use such tools for research, assistance, and minor copy-editing while writing your posts. Similarly, do not directly copy-paste READMEs or changelogs; instead tell us why such a project or update is interesting or compelling.
 
 Discourse provides tools that enable the community to collectively identify the best (and worst) contributions: favorites, bookmarks, likes, flags, replies, edits, and so forth. Use these tools to improve your own experience, and everyone else’s, too.
 
-Let’s try to leave our park better than we found it.
+Let’s try to leave our shared community space better than we found it.
 
 <a name="flag-problems"></a>
 
@@ -75,7 +77,6 @@ Make the effort to put things in the right place, so that we can spend more time
 *   Don’t start a topic in the wrong category.
 *   Don’t cross-post the same thing in multiple topics.
 *   Don’t post no-content replies.
-*   Don't post generative AI outputs (but _direct human language translation_ and minor editing is ok).
 *   Don’t divert a topic by changing it midstream.
 *   Don’t sign your posts &mdash; every post has your profile information attached to it.
 
